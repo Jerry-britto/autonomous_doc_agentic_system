@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluid AI - Autonomous Document Agent</title>
+    <!-- Google Fonts for premium typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Georgia&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header>
+            <div class="logo">
+                <span class="logo-accent">Fluid</span> AI
+            </div>
+            <div class="subtitle">Autonomous Plan-and-Execute Document Agent</div>
+        </header>
+
+        <!-- Main Content Grid -->
+        <main class="grid-layout">
+            <!-- Left Panel: Input & Control -->
+            <section class="panel input-panel">
+                <h2>Create Document</h2>
+                <p class="panel-desc">Describe the document you need. The agent will autonomously plan, research, draft, and assemble a polished Word document (.docx) using Minimalist Academic styling.</p>
+                
+                <div class="input-group">
+                    <label for="request-input">Prompt / Request</label>
+                    <textarea id="request-input" placeholder="Type a detailed request here, or choose one of the templates below..."></textarea>
+                </div>
+
+                <div class="template-section">
+                    <h3>Example Templates</h3>
+                    <div class="template-buttons">
+                        <button class="btn btn-secondary" onclick="loadTemplate('standard')">Standard Business Request</button>
+                        <button class="btn btn-secondary" onclick="loadTemplate('complex')">Complex Ambiguous Request</button>
+                    </div>
+                </div>
+
+                <button id="run-btn" class="btn btn-primary" onclick="runAgent()">
+                    <span class="btn-text">Execute Agent</span>
+                    <span class="spinner hidden" id="btn-spinner"></span>
+                </button>
+            </section>
+
+            <!-- Right Panel: Output & Trace logs -->
+            <section class="panel output-panel">
+                <h2>Execution & Output</h2>
+                
+                <div id="welcome-message" class="empty-state">
+                    <div class="empty-icon">📄</div>
+                    <p>Enter a prompt and click "Execute Agent" to see the autonomous agent create a plan and compile the document in real time.</p>
+                </div>
+
+                <!-- Result Card (Shown after run finishes) -->
+                <div id="result-card" class="result-card hidden">
+                    <div class="result-header">
+                        <div class="success-badge">✓ Generated</div>
+                        <h3 id="document-title">Document Title</h3>
+                    </div>
+                    <p id="result-message" class="result-message"></p>
+                    <a id="download-link" href="#" class="btn btn-success" download>
+                        <span>Download Word Document (.docx)</span>
+                    </a>
+                </div>
+
+                <!-- Plan Tasks Log -->
+                <div id="plan-section" class="plan-section hidden">
+                    <h3>Execution Plan (Dynamic TODO List)</h3>
+                    <div id="tasks-list" class="tasks-list">
+                        <!-- Tasks dynamically populated here -->
+                    </div>
+                </div>
+
+                <!-- Logs Trace -->
+                <div id="log-section" class="log-section hidden">
+                    <h3>Agent Execution Logs</h3>
+                    <div id="logs-console" class="logs-console">
+                        <!-- Log messages dynamically populated here -->
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Fluid AI Document Agent &bull; Powered by LangGraph & Groq</p>
+        </footer>
+    </div>
+
+    <script>
+        const TEMPLATES = {
+            standard: "Draft a comprehensive project plan for a 3-month AI marketing campaign, detailing the timeline, channels, and budget distribution.",
+            complex: "Write a technical design document for a scalable notification system. We have 50 million users, but I don't know what database to use. Make standard industry recommendations for us."
+        };
+
+        function loadTemplate(type) {
+            document.getElementById('request-input').value = TEMPLATES[type];
+        }
+
+        async function runAgent() {
+            const requestText = document.getElementById('request-input').value.trim();
+            if (!requestText) {
+                alert("Please enter a request prompt.");
+                return;
+            }
+
+            // Reset UI
+            document.getElementById('welcome-message').classList.add('hidden');
+            document.getElementById('result-card').classList.add('hidden');
+            document.getElementById('plan-section').classList.add('hidden');
+            document.getElementById('log-section').classList.add('hidden');
+            
+            // Toggle spinner
+            const runBtn = document.getElementById('run-btn');
+            const spinner = document.getElementById('btn-spinner');
+            runBtn.disabled = true;
+            spinner.classList.remove('hidden');
+
+            try {
+                const response = await fetch('/agent', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ request: requestText }),
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || "Server error occurred");
+                }
+
+                const data = await response.json();
+                
+                // Show Result Card
+                document.getElementById('document-title').innerText = data.title;
+                document.getElementById('result-message').innerText = data.message;
+                
+                if (data.download_url) {
+                    const dlLink = document.getElementById('download-link');
+                    dlLink.href = data.download_url;
+                    dlLink.style.display = "inline-flex";
+                }
+                
+                document.getElementById('result-card').classList.remove('hidden');
+
+                // Render plan and tasks
+                const tasksList = document.getElementById('tasks-list');
+                tasksList.innerHTML = '';
+                if (data.plan && data.plan.length > 0) {
+                    data.plan.forEach(task => {
+                        const taskEl = document.createElement('div');
+                        taskEl.className = `task-item task-status-${task.status}`;
+                        
+                        let toolBadge = task.assigned_tool !== 'none' ? `<span class="badge badge-tool">${task.assigned_tool}</span>` : '';
+                        let headingBadge = task.section_heading ? `<span class="badge badge-heading">Heading: ${task.section_heading}</span>` : '';
+                        
+                        // Status emoji
+                        let statusEmoji = "⏳";
+                        if (task.status === "completed") statusEmoji = "✅";
+                        if (task.status === "failed") statusEmoji = "❌";
+                        if (task.status === "in_progress") statusEmoji = "🔄";
+                        
+                        taskEl.innerHTML = `
+                            <div class="task-summary">
+                                <span class="task-emoji">${statusEmoji}</span>
+                                <div class="task-info">
+                                    <div class="task-title"><strong>${task.id}</strong>: ${task.description}</div>
+                                    <div class="task-badges">${toolBadge} ${headingBadge}</div>
+                                </div>
+                                <span class="task-status">${task.status}</span>
+                            </div>
+                        `;
+                        
+                        if (task.result) {
+                            const resultPreview = document.createElement('pre');
+                            resultPreview.className = "task-result-preview";
+                            resultPreview.innerText = task.result.length > 250 ? task.result.substring(0, 250) + "..." : task.result;
+                            taskEl.appendChild(resultPreview);
+                        }
+                        
+                        tasksList.appendChild(taskEl);
+                    });
+                    document.getElementById('plan-section').classList.remove('hidden');
+                }
+
+                // Render logs
+                const logsConsole = document.getElementById('logs-console');
+                logsConsole.innerHTML = '';
+                if (data.logs && data.logs.length > 0) {
+                    data.logs.forEach(log => {
+                        const logLine = document.createElement('div');
+                        logLine.className = 'log-line';
+                        logLine.innerText = log;
+                        logsConsole.appendChild(logLine);
+                    });
+                    document.getElementById('log-section').classList.remove('hidden');
+                }
+
+            } catch (err) {
+                alert("Error running agent: " + err.message);
+                document.getElementById('welcome-message').classList.remove('hidden');
+            } finally {
+                runBtn.disabled = false;
+                spinner.classList.add('hidden');
+            }
+        }
+    </script>
+</body>
+</html>
