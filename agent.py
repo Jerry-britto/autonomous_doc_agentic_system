@@ -273,7 +273,7 @@ Your job is to:
 
 Guidelines:
 - If the request is complex, ambiguous, or has missing information, include a research task (assigned_tool: 'web_search') first.
-- Include tasks to draft specific sections (assigned_tool: 'draft_section' and specify the 'section_heading').
+- TOOLS & HEADINGS: Any task that drafts content for a section of the final document MUST use `assigned_tool: 'draft_section'` and specify its corresponding `section_heading` (e.g., "1. Introduction"). Tasks that are just for research, outline, review, or administrative operations should use `assigned_tool: 'none'` and have a null `section_heading`.
 - Keep the tasks in logical order (e.g., research/outline first, then drafting sections).
 - Do not create too many tasks at once; the replanner can add more tasks later based on findings.
 - DEPENDENCIES: For each task, specify its 'dependencies' as a list of other task IDs that must be completed before this task can start (e.g., drafting tasks should depend on the corresponding research tasks). If there are no prerequisites, leave it empty.
@@ -526,12 +526,22 @@ Guidelines:
 - Update pending tasks if their descriptions should change based on new findings.
 - If all sections have been drafted to fulfill the user request, do not add any new tasks.
 - TASK MINIMIZATION: Only add new tasks if they are absolutely critical to resolving an essential information/content gap. Do not add micro-tasks or redundant sub-tasks.
+- TOOLS & HEADINGS: Any task that drafts content for a section of the final document MUST use `assigned_tool: 'draft_section'` and specify its corresponding `section_heading` (e.g., "2. Campaign Timeline"). Tasks that are just for research, outline, review, or administrative operations should use `assigned_tool: 'none'` and have a null `section_heading`.
 - DEPENDENCIES: For any task you add, specify its 'dependencies' as a list of task IDs that must be completed before this task can start (e.g., a section drafting task depends on its corresponding research task).
 """
     plan_update = invoke_llm(prompt, PlanUpdate, logs)
     
     # Convert LLM task models to dicts
     updated_plan_dicts = [t.model_dump() for t in plan_update.tasks]
+    
+    # Heuristic auto-correction for drafting tasks to make sure they are not run with tool 'none'
+    for t in updated_plan_dicts:
+        if ("draft" in t["id"].lower() or "write" in t["id"].lower()) and t.get("assigned_tool") == "none":
+            if not any(k in t["id"].lower() for k in ["review", "publish", "finalize", "format", "compil"]):
+                t["assigned_tool"] = "draft_section"
+                if not t.get("section_heading"):
+                    derived_heading = t["id"].replace("draft_section_", "").replace("draft_", "").replace("write_", "").replace("_", " ").title()
+                    t["section_heading"] = derived_heading
     
     # Create lookup map for existing tasks from the previous state
     old_tasks = {t["id"]: t for t in plan}

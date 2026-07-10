@@ -30,7 +30,7 @@ graph TD
     Executor --> Replanner[Re-planner]
     Replanner --> Selector
     
-    Selector -->|All tasks completed| Generator[ocument Generator]
+    Selector -->|All tasks completed| Generator[Document Generator]
     Generator --> END([End / Save Document])
 ```
 
