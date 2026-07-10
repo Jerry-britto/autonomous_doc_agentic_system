@@ -4,7 +4,7 @@ import asyncio
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
-from agent import run_agent, run_agent_with_job, job_store
+from agent import run_agent_with_job, job_store
 
 app = FastAPI(title="Fluid AI Document Agent")
 

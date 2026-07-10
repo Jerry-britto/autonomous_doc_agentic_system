@@ -1,263 +1,13 @@
 import os
-import json
 import re
-import uuid
 import time
-from typing import List, Dict, Any, TypedDict, Optional, Literal
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_tavily import TavilySearch
-from langgraph.graph import StateGraph, START, END
-from doc_builder import build_academic_document
+from typing import Dict, Any
 
-# Load environment variables
-load_dotenv()
-
-# Pydantic models for structured output
-class InitialTaskPlan(BaseModel):
-    id: str = Field(description="Unique short identifier, e.g., 'research_db', 'draft_intro'")
-    description: str = Field(description="Detailed description of what the task should accomplish")
-    assigned_tool: Literal["web_search", "draft_section", "none"] = Field(description="Tool to use: 'web_search', 'draft_section', or 'none'")
-    section_heading: Optional[str] = Field(None, description="Heading of the section in the final document, e.g. '1. Introduction'")
-    status: Literal["pending", "in_progress", "completed", "failed", "deferred"] = Field(default="pending")
-    dependencies: List[str] = Field(default_factory=list, description="IDs of tasks that must be completed before this task can start")
-    result: str = Field(default="", description="The output result or drafted content of the task")
-
-class InitialPlan(BaseModel):
-    document_title: str = Field(description="Formal title of the document")
-    tasks: List[InitialTaskPlan] = Field(description="List of initial tasks")
-
-class UpdateTaskPlan(BaseModel):
-    id: str = Field(description="Unique short identifier, e.g., 'research_db', 'draft_intro'")
-    description: Optional[str] = Field(None, description="Detailed description of what the task should accomplish")
-    assigned_tool: Optional[Literal["web_search", "draft_section", "none"]] = Field(None, description="Tool to use: 'web_search', 'draft_section', or 'none'")
-    section_heading: Optional[str] = Field(None, description="Heading of the section in the final document, e.g. '1. Introduction'")
-    status: Optional[Literal["pending", "in_progress", "completed", "failed", "deferred"]] = Field(default="pending")
-    dependencies: Optional[List[str]] = Field(default_factory=list, description="IDs of tasks that must be completed before this task can start")
-    result: Optional[str] = Field(default="", description="The output result or drafted content of the task")
-
-class PlanUpdate(BaseModel):
-    tasks: List[UpdateTaskPlan] = Field(description="Complete list of tasks, with updated statuses, new tasks, or modified tasks")
-
-# Singleton JobStore for asynchronous API tracking
-class JobStore:
-    _instance = None
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(JobStore, cls).__new__(cls)
-            cls._instance.filepath = os.path.join(os.getcwd(), "jobs.json")
-            cls._instance.jobs = {}
-            cls._instance.load()
-        return cls._instance
-        
-    def load(self):
-        if os.path.exists(self.filepath):
-            try:
-                with open(self.filepath, "r") as f:
-                    self.jobs = json.load(f)
-            except Exception as e:
-                print(f"Error loading jobs from disk: {e}")
-                self.jobs = {}
-                
-    def save(self):
-        try:
-            with open(self.filepath, "w") as f:
-                json.dump(self.jobs, f, indent=2)
-        except Exception as e:
-            print(f"Error saving jobs to disk: {e}")
-            
-    def get(self, job_id: str) -> Optional[dict]:
-        return self.jobs.get(job_id)
-        
-    def update(self, job_id: str, **kwargs):
-        if job_id in self.jobs:
-            self.jobs[job_id].update(kwargs)
-            self.save()
-            
-    def create(self, request_text: str) -> str:
-        job_id = str(uuid.uuid4())
-        self.jobs[job_id] = {
-            "status": "planning",
-            "title": "Document Generator",
-            "plan": [],
-            "logs": ["Job created. Starting autonomous planning agent..."],
-            "download_url": None,
-            "error": None
-        }
-        self.save()
-        return job_id
-
-job_store = JobStore()
-
-class LoggingList(list):
-    def __init__(self, job_id: str = None):
-        super().__init__()
-        self.job_id = job_id
-        
-    def append(self, item):
-        print(f"[AGENT LOG] {item}", flush=True)
-        super().append(item)
-        if self.job_id:
-            job_store.update(self.job_id, logs=list(self))
-
-# LangGraph State Definition
-class AgentState(TypedDict):
-    request: str
-    document_title: str
-    plan: List[Dict[str, Any]]  # Stored as dicts in state for serialization/compatibility
-    current_task_id: str
-    document_sections: Dict[str, str]
-    final_doc_path: str
-    logs: List[str]
-    step_count: int
-    job_id: str
-
-# Initialize LLM & Tools
-primary_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.1)
-fallback_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.1)
-search_tool = TavilySearch()
-
-def extract_json(text: str) -> Optional[dict]:
-    # Try finding markdown code block
-    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except:
-            pass
-    # Try finding general braces
-    match2 = re.search(r'(\{.*\})', text, re.DOTALL)
-    if match2:
-        try:
-            return json.loads(match2.group(1))
-        except:
-            pass
-    try:
-        return json.loads(text.strip())
-    except:
-        return None
-
-def invoke_llm(prompt: str, structured_output_model: Any = None, logs: List[str] = None) -> Any:
-    """Invokes LLM with rate limit retries, fallback to llama-3.1-8b-instant, and raw JSON parsing fallback."""
-    selected_llm = primary_llm
-    
-    # Try primary model with retries for rate limits
-    max_retries = 2
-    for attempt in range(max_retries + 1):
-        try:
-            if structured_output_model:
-                model = selected_llm.with_structured_output(structured_output_model)
-            else:
-                model = selected_llm
-            return model.invoke(prompt)
-        except Exception as e:
-            err_msg = str(e).lower()
-            if "429" in err_msg or "rate limit" in err_msg:
-                # If daily quota limit exceeded, retry won't help. We check if daily limit is mentioned.
-                if "daily" in err_msg or "quota" in err_msg or attempt == max_retries:
-                    msg = "Primary LLM quota exhausted or max retries reached. Switching to fallback llama-3.1-8b-instant..."
-                    print(msg)
-                    if logs is not None:
-                        logs.append(f"System: {msg}")
-                    selected_llm = fallback_llm
-                    break
-                else:
-                    sleep_time = 3 + attempt * 2
-                    msg = f"Primary LLM rate limited (attempt {attempt+1}/{max_retries}). Retrying in {sleep_time}s..."
-                    print(msg)
-                    if logs is not None:
-                        logs.append(f"System: {msg}")
-                    time.sleep(sleep_time)
-            else:
-                if structured_output_model:
-                    print(f"Primary structured invocation failed ({e}). Trying raw JSON fallback on primary...")
-                    break
-                else:
-                    raise e
-
-    try:
-        if structured_output_model:
-            model = selected_llm.with_structured_output(structured_output_model)
-        else:
-            model = selected_llm
-        return model.invoke(prompt)
-    except Exception as e:
-        if structured_output_model:
-            msg_fail = f"Structured model invocation failed: {str(e)}. Attempting raw JSON instruction & parsing..."
-            print(msg_fail)
-            if logs is not None:
-                logs.append(f"System: {msg_fail}")
-                
-            schema_instruction = f"\n\nYou MUST return your output in raw JSON format matching this structure:\n"
-            if structured_output_model.__name__ == "InitialPlan":
-                schema_instruction += """{
-  "document_title": "string title",
-  "tasks": [
-    {
-      "id": "task_id",
-      "description": "task description",
-      "assigned_tool": "web_search" | "draft_section" | "none",
-      "section_heading": "optional heading" or null
-    }
-  ]
-}"""
-            else:
-                schema_instruction += """{
-  "tasks": [
-    {
-      "id": "task_id",
-      "description": "task description",
-      "assigned_tool": "web_search" | "draft_section" | "none",
-      "section_heading": "optional heading" or null,
-      "status": "pending" | "in_progress" | "completed" | "failed",
-      "result": "result content"
-    }
-  ]
-}"""
-            
-            raw_prompt = prompt + schema_instruction
-            raw_res = selected_llm.invoke(raw_prompt)
-            parsed_dict = extract_json(raw_res.content)
-            if parsed_dict:
-                try:
-                    validated = structured_output_model.model_validate(parsed_dict)
-                    print("Raw JSON parsing and validation succeeded!")
-                    return validated
-                except Exception as val_e:
-                    print("Validation of parsed JSON failed, performing fallback repair:", val_e)
-                    if "tasks" in parsed_dict and isinstance(parsed_dict["tasks"], list):
-                        clean_tasks = []
-                        for t in parsed_dict["tasks"]:
-                            clean_tasks.append({
-                                "id": str(t.get("id", "task")),
-                                "description": str(t.get("description", "draft")),
-                                "assigned_tool": t.get("assigned_tool", "none") if t.get("assigned_tool") in ["web_search", "draft_section", "none"] else "none",
-                                "section_heading": t.get("section_heading"),
-                                "status": t.get("status", "pending") if t.get("status") in ["pending", "in_progress", "completed", "failed", "deferred"] else "pending",
-                                "dependencies": t.get("dependencies", []) if isinstance(t.get("dependencies"), list) else [],
-                                "result": str(t.get("result", ""))
-                            })
-                        parsed_dict["tasks"] = clean_tasks
-                        if structured_output_model.__name__ == "InitialPlan":
-                            parsed_dict["document_title"] = parsed_dict.get("document_title", "Document")
-                        return structured_output_model.model_validate(parsed_dict)
-            raise e
-        else:
-            raise e
-
-def get_plan_summary(plan: List[Dict[str, Any]]) -> str:
-    """Format the plan for LLM prompts, keeping it token-efficient."""
-    summary = []
-    for t in plan:
-        tool_info = f" [Tool: {t['assigned_tool']}]" if t['assigned_tool'] != 'none' else ""
-        heading_info = f" [Heading: {t['section_heading']}]" if t.get('section_heading') else ""
-        summary.append(f"- ID: {t['id']} | Description: {t['description']}{tool_info}{heading_info} | Status: {t['status']}")
-        # Only show result snippets for web search tasks to save context tokens
-        if t['result'] and t['assigned_tool'] == "web_search":
-            snippet = t['result'][:300] + "..." if len(t['result']) > 300 else t['result']
-            summary.append(f"  Research Summary: {snippet}")
-    return "\n".join(summary)
+from agent.state import AgentState
+from agent.models import InitialPlan, PlanUpdate
+from agent.store import job_store
+from agent.llm import invoke_llm, get_plan_summary, search_tool
+from agent.doc_builder import build_academic_document
 
 # 1. Planner Node
 def planner_node(state: AgentState) -> Dict[str, Any]:
@@ -273,6 +23,7 @@ Your job is to:
 
 Guidelines:
 - If the request is complex, ambiguous, or has missing information, include a research task (assigned_tool: 'web_search') first.
+- DOCUMENT STRUCTURE: Every plan MUST include a task to draft the introduction or overview as the very first document section (e.g., "1. Introduction" or "1. Overview").
 - TOOLS & HEADINGS: Any task that drafts content for a section of the final document MUST use `assigned_tool: 'draft_section'` and specify its corresponding `section_heading` (e.g., "1. Introduction"). Tasks that are just for research, outline, review, or administrative operations should use `assigned_tool: 'none'` and have a null `section_heading`.
 - Keep the tasks in logical order (e.g., research/outline first, then drafting sections).
 - Do not create too many tasks at once; the replanner can add more tasks later based on findings.
@@ -399,25 +150,32 @@ def executor_node(state: AgentState) -> Dict[str, Any]:
     
     # Execute tool
     if task["assigned_tool"] == "web_search":
-        try:
-            # Step 1: Run Tavily search
-            search_query = task["description"]
-            logs.append(f"Executor: Searching web for '{search_query}'...")
-            search_res = search_tool.invoke(search_query)
-            
-            # Step 2: Use LLM to summarize search results
-            logs.append(f"Executor: Summarizing search findings...")
-            summarize_prompt = f"""You are a professional researcher. Summarize the following web search results to answer the task: "{task['description']}".
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Step 1: Run Tavily search
+                search_query = task["description"]
+                logs.append(f"Executor: Searching web for '{search_query}' (attempt {attempt + 1}/{max_retries})...")
+                search_res = search_tool.invoke(search_query)
+                
+                # Step 2: Use LLM to summarize search results
+                logs.append(f"Executor: Summarizing search findings...")
+                summarize_prompt = f"""You are a professional researcher. Summarize the following web search results to answer the task: "{task['description']}".
 Search Results: {search_res}
 
 Provide a detailed, structured, and informative summary of findings, data, and recommendations. Use markdown format.
 """
-            summary_res = invoke_llm(summarize_prompt, logs=logs)
-            result_content = summary_res.content
-            logs.append(f"Executor: Research compiled successfully (size: {len(result_content)} chars).")
-        except Exception as e:
-            result_content = f"Search error occurred: {str(e)}"
-            logs.append(f"Executor Error during search: {str(e)}")
+                summary_res = invoke_llm(summarize_prompt, logs=logs)
+                result_content = summary_res.content
+                logs.append(f"Executor: Research compiled successfully (size: {len(result_content)} chars).")
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logs.append(f"Executor: Search attempt {attempt + 1} failed: {str(e)}. Retrying in 4s...")
+                    time.sleep(4.0)
+                else:
+                    result_content = f"Search error occurred: {str(e)}"
+                    logs.append(f"Executor Error during search: {str(e)}")
             
     elif task["assigned_tool"] == "draft_section":
         # Draft section content
@@ -525,11 +283,15 @@ Guidelines:
 - Keep pending tasks if they are still relevant.
 - Update pending tasks if their descriptions should change based on new findings.
 - If all sections have been drafted to fulfill the user request, do not add any new tasks.
+- DOCUMENT STRUCTURE: Every plan MUST include a task to draft the introduction or overview as the very first document section (e.g., "1. Introduction" or "1. Overview").
 - TASK MINIMIZATION: Only add new tasks if they are absolutely critical to resolving an essential information/content gap. Do not add micro-tasks or redundant sub-tasks.
 - TOOLS & HEADINGS: Any task that drafts content for a section of the final document MUST use `assigned_tool: 'draft_section'` and specify its corresponding `section_heading` (e.g., "2. Campaign Timeline"). Tasks that are just for research, outline, review, or administrative operations should use `assigned_tool: 'none'` and have a null `section_heading`.
 - DEPENDENCIES: For any task you add, specify its 'dependencies' as a list of task IDs that must be completed before this task can start (e.g., a section drafting task depends on its corresponding research task).
 """
     plan_update = invoke_llm(prompt, PlanUpdate, logs)
+    
+    # Create lookup map for existing tasks from the previous state
+    old_tasks = {t["id"]: t for t in plan}
     
     # Convert LLM task models to dicts
     updated_plan_dicts = [t.model_dump() for t in plan_update.tasks]
@@ -542,9 +304,17 @@ Guidelines:
                 if not t.get("section_heading"):
                     derived_heading = t["id"].replace("draft_section_", "").replace("draft_", "").replace("write_", "").replace("_", " ").title()
                     t["section_heading"] = derived_heading
+                    
+    # Filter out out-of-scope development/operational tasks added by LLM (which cause planning loops)
+    filtered_updated_tasks = []
+    out_of_scope_keywords = ["testing", "deployment", "monitoring", "maintenance", "upgrade", "retirement", "implementation", "development", "deploy", "monitor", "maintain", "retire", "code"]
+    for t in updated_plan_dicts:
+        is_new = t["id"] not in old_tasks
+        if is_new and any(kw in t["id"].lower() for kw in out_of_scope_keywords):
+            continue
+        filtered_updated_tasks.append(t)
+    updated_plan_dicts = filtered_updated_tasks
     
-    # Create lookup map for existing tasks from the previous state
-    old_tasks = {t["id"]: t for t in plan}
     new_task_ids = {t["id"] for t in updated_plan_dicts}
     
     # Preserve any completed, failed, or deferred tasks that the LLM omitted
@@ -628,30 +398,29 @@ def generator_node(state: AgentState) -> Dict[str, Any]:
     document_sections = state["document_sections"]
     
     # Gather sections in the logical order they were completed/drafted
-    sections_to_build = []
-    # Keep track of what we added to prevent duplicates
-    added_headings = set()
+    # Gather sections, merging content for tasks sharing the same heading
+    sections_map = {} # heading -> list of content strings
     
     # Add sections based on completed tasks
     for t in plan:
         if t["assigned_tool"] == "draft_section" and t["section_heading"] and t["status"] == "completed":
             heading = t["section_heading"]
             content = t["result"]
-            if heading not in added_headings:
-                sections_to_build.append({
-                    "heading": heading,
-                    "content": content
-                })
-                added_headings.add(heading)
-                
+            if heading not in sections_map:
+                sections_map[heading] = []
+            sections_map[heading].append(content)
+            
     # Fallback to document_sections dict for anything missing
     for heading, content in document_sections.items():
-        if heading not in added_headings:
-            sections_to_build.append({
-                "heading": heading,
-                "content": content
-            })
-            added_headings.add(heading)
+        if heading not in sections_map:
+            sections_map[heading] = [content]
+            
+    sections_to_build = []
+    for heading, contents in sections_map.items():
+        sections_to_build.append({
+            "heading": heading,
+            "content": "\n\n".join(contents)
+        })
             
     # Sort sections numerically by heading prefix (e.g., "1. Introduction" -> [1], "3.1.2 Database" -> [3, 1, 2])
     def parse_heading_numbers(heading_str: str) -> list:
@@ -696,86 +465,3 @@ def generator_node(state: AgentState) -> Dict[str, Any]:
         "final_doc_path": output_path,
         "logs": logs
     }
-
-# Router logic
-def selector_router(state: AgentState) -> Literal["executor_node", "generator_node"]:
-    if state["current_task_id"]:
-        return "executor_node"
-    return "generator_node"
-
-# LangGraph Construction
-def create_agent_graph():
-    builder = StateGraph(AgentState)
-    
-    # Add Nodes
-    builder.add_node("planner_node", planner_node)
-    builder.add_node("selector_node", selector_node)
-    builder.add_node("executor_node", executor_node)
-    builder.add_node("replanner_node", replanner_node)
-    builder.add_node("generator_node", generator_node)
-    
-    # Add Edges
-    builder.add_edge(START, "planner_node")
-    builder.add_edge("planner_node", "selector_node")
-    
-    # Conditional Routing from Selector
-    builder.add_conditional_edges(
-        "selector_node",
-        selector_router,
-        {
-            "executor_node": "executor_node",
-            "generator_node": "generator_node"
-        }
-    )
-    
-    builder.add_edge("executor_node", "replanner_node")
-    builder.add_edge("replanner_node", "selector_node")
-    builder.add_edge("generator_node", END)
-    
-    return builder.compile()
-
-# Test runner helper
-def run_agent(request_text: str) -> Dict[str, Any]:
-    graph = create_agent_graph()
-    initial_state = {
-        "request": request_text,
-        "document_title": "",
-        "plan": [],
-        "current_task_id": "",
-        "document_sections": {},
-        "final_doc_path": "",
-        "logs": LoggingList(),
-        "step_count": 0,
-        "job_id": ""
-    }
-    
-    final_state = graph.invoke(initial_state)
-    return final_state
-
-# Background execution runner helper using JobStore
-def run_agent_with_job(request_text: str, job_id: str) -> Dict[str, Any]:
-    graph = create_agent_graph()
-    initial_state = {
-        "request": request_text,
-        "document_title": "",
-        "plan": [],
-        "current_task_id": "",
-        "document_sections": {},
-        "final_doc_path": "",
-        "logs": LoggingList(job_id),
-        "step_count": 0,
-        "job_id": job_id
-    }
-    try:
-        final_state = graph.invoke(initial_state)
-        return final_state
-    except Exception as e:
-        msg = f"Agent execution failed with error: {str(e)}"
-        print(f"[AGENT ERROR] {msg}", flush=True)
-        job_store.update(job_id, status="failed", error=str(e))
-        # Log error in job
-        job = job_store.get(job_id)
-        if job:
-            job["logs"].append(msg)
-            job_store.update(job_id, logs=job["logs"])
-        raise e
