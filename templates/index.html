@@ -70,6 +70,15 @@
                 <!-- Plan Tasks Log -->
                 <div id="plan-section" class="plan-section hidden">
                     <h3>Execution Plan (Dynamic TODO List)</h3>
+                    
+                    <!-- Task Filter Tabs -->
+                    <div class="task-filters">
+                        <button id="filter-btn-all" class="filter-btn active" onclick="setTaskFilter('all')">All</button>
+                        <button id="filter-btn-pending" class="filter-btn" onclick="setTaskFilter('pending')">Pending</button>
+                        <button id="filter-btn-in_progress" class="filter-btn" onclick="setTaskFilter('in_progress')">In Progress</button>
+                        <button id="filter-btn-completed" class="filter-btn" onclick="setTaskFilter('completed')">Completed</button>
+                    </div>
+
                     <div id="tasks-list" class="tasks-list">
                         <!-- Tasks dynamically populated here -->
                     </div>
@@ -100,11 +109,110 @@
             document.getElementById('request-input').value = TEMPLATES[type];
         }
 
+        let eventSource = null;
+        let currentTasksPlan = [];
+        let activeFilter = 'all';
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        function setTaskFilter(filter) {
+            activeFilter = filter;
+            const buttons = document.querySelectorAll('.filter-btn');
+            buttons.forEach(btn => btn.classList.remove('active'));
+            
+            const activeBtn = document.getElementById(`filter-btn-${filter}`);
+            if (activeBtn) {
+                activeBtn.classList.add('active');
+            }
+            renderTasks(currentTasksPlan);
+        }
+
+        function renderTasks(plan) {
+            const tasksList = document.getElementById('tasks-list');
+            tasksList.innerHTML = '';
+            
+            if (!plan || plan.length === 0) {
+                return;
+            }
+            
+            const filteredPlan = plan.filter(task => {
+                if (activeFilter === 'all') return true;
+                if (activeFilter === 'pending') {
+                    return task.status === 'pending' || task.status === 'skipped';
+                }
+                if (activeFilter === 'in_progress') {
+                    return task.status === 'in_progress';
+                }
+                if (activeFilter === 'completed') {
+                    return task.status === 'completed';
+                }
+                return true;
+            });
+            
+            filteredPlan.forEach(task => {
+                const taskEl = document.createElement('div');
+                taskEl.className = `task-item task-status-${task.status}`;
+                
+                let toolBadge = task.assigned_tool !== 'none' ? `<span class="badge badge-tool">${task.assigned_tool}</span>` : '';
+                let headingBadge = task.section_heading ? `<span class="badge badge-heading">Heading: ${task.section_heading}</span>` : '';
+                
+                // Status emoji
+                let statusEmoji = "⏳";
+                if (task.status === "completed") statusEmoji = "✅";
+                if (task.status === "failed") statusEmoji = "❌";
+                if (task.status === "in_progress") statusEmoji = "🔄";
+                if (task.status === "skipped") statusEmoji = "⏭️";
+                
+                taskEl.innerHTML = `
+                    <div class="task-summary">
+                        <span class="task-emoji">${statusEmoji}</span>
+                        <div class="task-info">
+                            <div class="task-title"><strong>${task.id}</strong>: ${task.description}</div>
+                            <div class="task-badges">${toolBadge} ${headingBadge}</div>
+                        </div>
+                        <span class="task-status">${task.status}</span>
+                    </div>
+                `;
+                
+                if (task.result) {
+                    const detailsEl = document.createElement('details');
+                    detailsEl.className = "task-result-details";
+                    
+                    const summaryEl = document.createElement('summary');
+                    summaryEl.innerText = "View Task Output";
+                    
+                    const contentEl = document.createElement('div');
+                    contentEl.className = "task-result-content";
+                    contentEl.innerHTML = escapeHtml(task.result);
+                    
+                    detailsEl.appendChild(summaryEl);
+                    detailsEl.appendChild(contentEl);
+                    taskEl.appendChild(detailsEl);
+                }
+                
+                tasksList.appendChild(taskEl);
+            });
+            
+            document.getElementById('plan-section').classList.remove('hidden');
+        }
+
         async function runAgent() {
             const requestText = document.getElementById('request-input').value.trim();
             if (!requestText) {
                 alert("Please enter a request prompt.");
                 return;
+            }
+
+            if (eventSource) {
+                eventSource.close();
             }
 
             // Reset UI
@@ -134,79 +242,76 @@
                 }
 
                 const data = await response.json();
+                const jobId = data.job_id;
                 
-                // Show Result Card
-                document.getElementById('document-title').innerText = data.title;
-                document.getElementById('result-message').innerText = data.message;
-                
-                if (data.download_url) {
-                    const dlLink = document.getElementById('download-link');
-                    dlLink.href = data.download_url;
-                    dlLink.style.display = "inline-flex";
-                }
-                
-                document.getElementById('result-card').classList.remove('hidden');
-
-                // Render plan and tasks
-                const tasksList = document.getElementById('tasks-list');
-                tasksList.innerHTML = '';
-                if (data.plan && data.plan.length > 0) {
-                    data.plan.forEach(task => {
-                        const taskEl = document.createElement('div');
-                        taskEl.className = `task-item task-status-${task.status}`;
-                        
-                        let toolBadge = task.assigned_tool !== 'none' ? `<span class="badge badge-tool">${task.assigned_tool}</span>` : '';
-                        let headingBadge = task.section_heading ? `<span class="badge badge-heading">Heading: ${task.section_heading}</span>` : '';
-                        
-                        // Status emoji
-                        let statusEmoji = "⏳";
-                        if (task.status === "completed") statusEmoji = "✅";
-                        if (task.status === "failed") statusEmoji = "❌";
-                        if (task.status === "in_progress") statusEmoji = "🔄";
-                        
-                        taskEl.innerHTML = `
-                            <div class="task-summary">
-                                <span class="task-emoji">${statusEmoji}</span>
-                                <div class="task-info">
-                                    <div class="task-title"><strong>${task.id}</strong>: ${task.description}</div>
-                                    <div class="task-badges">${toolBadge} ${headingBadge}</div>
-                                </div>
-                                <span class="task-status">${task.status}</span>
-                            </div>
-                        `;
-                        
-                        if (task.result) {
-                            const resultPreview = document.createElement('pre');
-                            resultPreview.className = "task-result-preview";
-                            resultPreview.innerText = task.result.length > 250 ? task.result.substring(0, 250) + "..." : task.result;
-                            taskEl.appendChild(resultPreview);
-                        }
-                        
-                        tasksList.appendChild(taskEl);
-                    });
-                    document.getElementById('plan-section').classList.remove('hidden');
-                }
-
-                // Render logs
+                // Show logs trace right away
+                document.getElementById('log-section').classList.remove('hidden');
                 const logsConsole = document.getElementById('logs-console');
-                logsConsole.innerHTML = '';
-                if (data.logs && data.logs.length > 0) {
-                    data.logs.forEach(log => {
-                        const logLine = document.createElement('div');
-                        logLine.className = 'log-line';
-                        logLine.innerText = log;
-                        logsConsole.appendChild(logLine);
-                    });
-                    document.getElementById('log-section').classList.remove('hidden');
-                }
+                logsConsole.innerHTML = '<div class="log-line">Connecting to event stream...</div>';
+                
+                // Initialize EventSource for SSE streaming
+                eventSource = new EventSource(`/agent/stream/${jobId}`);
+                
+                eventSource.onmessage = function(event) {
+                    const job = JSON.parse(event.data);
+                    
+                    // 1. Render logs dynamically
+                    logsConsole.innerHTML = '';
+                    if (job.logs && job.logs.length > 0) {
+                        job.logs.forEach(log => {
+                            const logLine = document.createElement('div');
+                            logLine.className = 'log-line';
+                            logLine.innerText = log;
+                            logsConsole.appendChild(logLine);
+                        });
+                        document.getElementById('log-section').classList.remove('hidden');
+                        logsConsole.scrollTop = logsConsole.scrollHeight;
+                    }
+                    
+                    // 2. Cache and Render Todo plan list dynamically
+                    currentTasksPlan = job.plan || [];
+                    renderTasks(currentTasksPlan);
+                    
+                    // 3. Handle termination states
+                    if (job.status === "completed") {
+                        eventSource.close();
+                        stopLoadingState();
+                        
+                        // Show Result Card
+                        document.getElementById('document-title').innerText = job.title;
+                        document.getElementById('result-message').innerText = "Document generated successfully!";
+                        
+                        const dlLink = document.getElementById('download-link');
+                        dlLink.href = job.download_url;
+                        dlLink.style.display = "inline-flex";
+                        
+                        document.getElementById('result-card').classList.remove('hidden');
+                    } else if (job.status === "failed") {
+                        eventSource.close();
+                        stopLoadingState();
+                        alert("Agent execution failed: " + (job.error || "Unknown error"));
+                    }
+                };
+                
+                eventSource.onerror = function(err) {
+                    console.error("EventSource failed:", err);
+                    eventSource.close();
+                    stopLoadingState();
+                };
 
             } catch (err) {
-                alert("Error running agent: " + err.message);
+                alert("Error starting agent: " + err.message);
                 document.getElementById('welcome-message').classList.remove('hidden');
-            } finally {
                 runBtn.disabled = false;
                 spinner.classList.add('hidden');
             }
+        }
+
+        function stopLoadingState() {
+            const runBtn = document.getElementById('run-btn');
+            const spinner = document.getElementById('btn-spinner');
+            runBtn.disabled = false;
+            spinner.classList.add('hidden');
         }
     </script>
 </body>

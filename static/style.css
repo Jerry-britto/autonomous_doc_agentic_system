@@ -359,19 +359,45 @@ textarea:focus {
 .task-status-in_progress .task-status { color: var(--status-progress); background-color: #fef3c7; }
 .task-status-completed .task-status { color: var(--status-completed); background-color: #dcfce7; }
 .task-status-failed .task-status { color: var(--status-failed); background-color: #fee2e2; }
+.task-status-skipped {
+    opacity: 0.75;
+    background-color: #f8fafc !important;
+    border-style: dashed !important;
+}
+.task-status-skipped .task-status { color: #64748b; background-color: #e2e8f0; }
 
-.task-result-preview {
+.task-result-details {
     margin-top: 0.75rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.5rem;
+}
+
+.task-result-details summary {
+    font-size: 0.85rem;
+    color: var(--accent);
+    cursor: pointer;
+    font-weight: 600;
+    outline: none;
+    user-select: none;
+    transition: color 0.2s;
+}
+
+.task-result-details summary:hover {
+    color: var(--accent-hover);
+}
+
+.task-result-content {
+    margin-top: 0.5rem;
     background-color: #f8fafc;
-    border-left: 3px solid #cbd5e1;
+    border: 1px solid var(--border);
+    border-radius: 6px;
     padding: 0.75rem;
     font-family: 'Consolas', monospace;
-    font-size: 0.8rem;
-    overflow-x: auto;
+    font-size: 0.825rem;
+    overflow-y: auto;
     white-space: pre-wrap;
-    color: #475569;
-    max-height: 120px;
-    border-radius: 0 4px 4px 0;
+    color: #334155;
+    max-height: 200px;
 }
 
 /* Logs Trace Console */
@@ -436,4 +462,36 @@ footer {
 
 .hidden {
     display: none !important;
+}
+
+/* Task Filter Tabs */
+.task-filters {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.75rem;
+}
+
+.filter-btn {
+    background-color: var(--bg-secondary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    padding: 0.4rem 1rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.filter-btn:hover {
+    background-color: #f1f5f9;
+    color: var(--text-primary);
+}
+
+.filter-btn.active {
+    background-color: var(--accent);
+    color: #ffffff;
+    border-color: var(--accent);
 }

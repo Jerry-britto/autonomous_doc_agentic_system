@@ -1,35 +1,85 @@
 import os
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+import json
+import asyncio
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
-from agent import run_agent
+from agent import run_agent, run_agent_with_job, job_store
 
 app = FastAPI(title="Fluid AI Document Agent")
 
 class AgentRequest(BaseModel):
     request: str
 
+def run_agent_background(request_text: str, job_id: str):
+    try:
+        run_agent_with_job(request_text, job_id)
+    except Exception as e:
+        pass
+
 @app.post("/agent")
-async def run_document_agent(payload: AgentRequest):
+async def run_document_agent(payload: AgentRequest, background_tasks: BackgroundTasks):
     if not payload.request.strip():
         raise HTTPException(status_code=400, detail="Request text cannot be empty.")
-    try:
-        # Run agent synchronous
-        result = run_agent(payload.request)
+    
+    # Create unique job
+    job_id = job_store.create(payload.request)
+    
+    # Run agent in the background
+    background_tasks.add_task(run_agent_background, payload.request, job_id)
+    
+    return {
+        "status": "queued",
+        "job_id": job_id
+    }
+
+@app.get("/agent/status/{job_id}")
+async def get_agent_status(job_id: str):
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job
+
+@app.get("/agent/stream/{job_id}")
+async def stream_agent_status(job_id: str):
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
         
-        path = result.get("final_doc_path", "")
-        filename = os.path.basename(path) if path and os.path.exists(path) else ""
+    async def event_generator():
+        last_plan_json = None
+        last_logs_count = 0
         
-        return {
-            "status": "success" if filename else "failed",
-            "message": f"Document generated: {result.get('document_title')}" if filename else "Failed to generate document.",
-            "title": result.get("document_title", ""),
-            "plan": result.get("plan", []),
-            "logs": result.get("logs", []),
-            "download_url": f"/download/{filename}" if filename else None
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        while True:
+            current_job = job_store.get(job_id)
+            if not current_job:
+                break
+                
+            current_plan_json = json.dumps(current_job.get("plan", []))
+            plan_changed = current_plan_json != last_plan_json
+            logs_changed = len(current_job.get("logs", [])) > last_logs_count
+            status = current_job.get("status")
+            
+            if plan_changed or logs_changed or status in ["completed", "failed"]:
+                last_plan_json = current_plan_json
+                last_logs_count = len(current_job.get("logs", []))
+                
+                payload = {
+                    "status": current_job["status"],
+                    "title": current_job["title"],
+                    "plan": current_job["plan"],
+                    "logs": current_job["logs"],
+                    "download_url": current_job["download_url"],
+                    "error": current_job["error"]
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+                
+            if status in ["completed", "failed"]:
+                break
+                
+            await asyncio.sleep(0.2)
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/download/{filename}")
 async def download_file(filename: str):

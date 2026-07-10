@@ -57,6 +57,14 @@ def apply_text_runs(paragraph, text):
         else:
             paragraph.add_run(part)
 
+def headings_match(h1: str, h2: str) -> bool:
+    """Check if two heading texts are conceptually identical to prevent duplicate title rendering."""
+    def clean(s):
+        # Remove digits, dots, spaces, hyphens, colons, and convert to lowercase
+        return re.sub(r'[\d\.\s\-\:]+', '', s.lower()).strip()
+    c1, c2 = clean(h1), clean(h2)
+    return c1 == c2 or c1 in c2 or c2 in c1
+
 def build_academic_document(title: str, sections: list, output_path: str):
     """
     Generates a word document (.docx) with Minimalist Academic Styling.
@@ -130,6 +138,11 @@ def build_academic_document(title: str, sections: list, output_path: str):
         for line in lines:
             stripped = line.strip()
             
+            # Clean raw markdown link syntax: [link text](url) -> "link text"
+            stripped = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', stripped)
+            # Remove escape backslashes from markdown symbols (e.g. \* or \- or \_)
+            stripped = re.sub(r'\\([*_\-`#])', r'\1', stripped)
+            
             # 1. Handle Tables
             if stripped.startswith('|'):
                 in_table = True
@@ -197,24 +210,58 @@ def build_academic_document(title: str, sections: list, output_path: str):
             if not stripped:
                 continue
                 
-            # 3. Handle subheadings within section (###, ####)
-            if stripped.startswith('### '):
+            # 3. Handle subheadings within section (#, ##, ###, ####)
+            if stripped.startswith('# '):
+                title_text = stripped[2:].strip()
+                if headings_match(heading_text, title_text):
+                    continue  # Skip duplication of section heading
+                sub_p = doc.add_paragraph()
+                sub_p.paragraph_format.space_before = Pt(14)
+                sub_p.paragraph_format.space_after = Pt(4)
+                sub_p.paragraph_format.keep_with_next = True
+                sub_run = sub_p.add_run(title_text)
+                sub_run.font.name = 'Times New Roman'
+                sub_run.font.size = Pt(14)
+                sub_run.font.bold = True
+                sub_run.font.color.rgb = RGBColor(0, 0, 0)
+                continue
+            elif stripped.startswith('## '):
+                title_text = stripped[3:].strip()
+                if headings_match(heading_text, title_text):
+                    continue  # Skip duplication of section heading
                 sub_p = doc.add_paragraph()
                 sub_p.paragraph_format.space_before = Pt(12)
                 sub_p.paragraph_format.space_after = Pt(4)
                 sub_p.paragraph_format.keep_with_next = True
-                sub_run = sub_p.add_run(stripped[4:])
+                sub_run = sub_p.add_run(title_text)
                 sub_run.font.name = 'Times New Roman'
                 sub_run.font.size = Pt(13)
                 sub_run.font.bold = True
                 sub_run.font.color.rgb = RGBColor(0, 0, 0)
                 continue
+            elif stripped.startswith('### '):
+                title_text = stripped[4:].strip()
+                if headings_match(heading_text, title_text):
+                    continue  # Skip duplication
+                sub_p = doc.add_paragraph()
+                sub_p.paragraph_format.space_before = Pt(12)
+                sub_p.paragraph_format.space_after = Pt(4)
+                sub_p.paragraph_format.keep_with_next = True
+                sub_run = sub_p.add_run(title_text)
+                sub_run.font.name = 'Times New Roman'
+                sub_run.font.size = Pt(12)
+                sub_run.font.bold = True
+                sub_run.font.color.rgb = RGBColor(0, 0, 0)
+                continue
             elif stripped.startswith('#### '):
+                title_text = stripped[5:].strip()
+                if headings_match(heading_text, title_text):
+                    continue  # Skip duplication
                 sub_p = doc.add_paragraph()
                 sub_p.paragraph_format.space_before = Pt(10)
                 sub_p.paragraph_format.space_after = Pt(4)
                 sub_p.paragraph_format.keep_with_next = True
-                sub_run = sub_p.add_run(stripped[5:])
+                sub_run = sub_p.add_run(title_text)
                 sub_run.font.name = 'Times New Roman'
                 sub_run.font.size = Pt(11)
                 sub_run.font.bold = True

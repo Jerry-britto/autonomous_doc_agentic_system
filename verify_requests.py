@@ -1,6 +1,7 @@
 import httpx
 import sys
 import os
+import time
 
 API_URL = "http://127.0.0.1:8000"
 
@@ -11,39 +12,62 @@ def run_test(name, payload):
     print("=" * 60)
     
     try:
-        # Increase timeout because agent runs multi-step planning loops
-        response = httpx.post(f"{API_URL}/agent", json=payload, timeout=600.0)
+        response = httpx.post(f"{API_URL}/agent", json=payload, timeout=30.0)
         
         if response.status_code != 200:
             print(f"Error Response: {response.text}")
             sys.exit(1)
             
         data = response.json()
-        print(f"Status: {data['status']}")
-        print(f"Generated Document Title: {data['title']}")
-        print(f"Download URL: {data['download_url']}")
+        job_id = data["job_id"]
+        print(f"Job queued successfully. Job ID: {job_id}")
         
-        print("\nAgent Plan Details:")
-        for idx, task in enumerate(data['plan']):
-            print(f"  {idx+1}. Task ID: {task['id']}")
-            print(f"     Description: {task['description']}")
-            print(f"     Tool: {task['assigned_tool']}")
-            print(f"     Status: {task['status']}")
-            if task.get('section_heading'):
-                print(f"     Section Heading: {task['section_heading']}")
-            print(f"     Result Preview: {task['result'][:150]}...")
+        last_log_len = 0
+        while True:
+            status_res = httpx.get(f"{API_URL}/agent/status/{job_id}", timeout=10.0)
+            if status_res.status_code != 200:
+                print(f"Failed to fetch job status: {status_res.text}")
+                sys.exit(1)
+                
+            job = status_res.json()
             
-        print("\nAgent Log Trace:")
-        for log in data['logs']:
-            print(f"  [LOG] {log}")
+            # Print new logs
+            logs = job.get("logs", [])
+            if len(logs) > last_log_len:
+                for log in logs[last_log_len:]:
+                    print(f"  [LOG] {log}")
+                last_log_len = len(logs)
+                
+            if job["status"] == "completed":
+                print("\nJob completed successfully!")
+                print(f"Generated Document Title: {job['title']}")
+                print(f"Download URL: {job['download_url']}")
+                
+                print("\nFinal Agent Plan:")
+                for idx, task in enumerate(job['plan']):
+                    print(f"  {idx+1}. Task ID: {task['id']}")
+                    print(f"     Description: {task['description']}")
+                    print(f"     Tool: {task['assigned_tool']}")
+                    print(f"     Status: {task['status']}")
+                    if task.get('section_heading'):
+                        print(f"     Section Heading: {task['section_heading']}")
+                    snippet = task['result'][:150] + "..." if task.get('result') else ""
+                    print(f"     Result Preview: {snippet}")
+                    
+                # Verify download
+                download_url = f"{API_URL}{job['download_url']}"
+                dl_response = httpx.get(download_url)
+                assert dl_response.status_code == 200, f"Failed to download document from {download_url}"
+                print(f"\nSUCCESS: Document successfully downloaded ({len(dl_response.content)} bytes)")
+                print("=" * 60 + "\n")
+                break
+                
+            elif job["status"] == "failed":
+                print(f"\nJob failed: {job.get('error')}")
+                sys.exit(1)
+                
+            time.sleep(2.0)
             
-        # Verify download
-        download_url = f"{API_URL}{data['download_url']}"
-        dl_response = httpx.get(download_url)
-        assert dl_response.status_code == 200, f"Failed to download document from {download_url}"
-        print(f"\nSUCCESS: Document successfully downloaded ({len(dl_response.content)} bytes)")
-        print("=" * 60 + "\n")
-        
     except Exception as e:
         print(f"Exception during test: {e}")
         sys.exit(1)

@@ -1,6 +1,8 @@
 import os
 import json
 import re
+import uuid
+import time
 from typing import List, Dict, Any, TypedDict, Optional, Literal
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -36,10 +38,46 @@ class UpdateTaskPlan(BaseModel):
 class PlanUpdate(BaseModel):
     tasks: List[UpdateTaskPlan] = Field(description="Complete list of tasks, with updated statuses, new tasks, or modified tasks")
 
+# Singleton JobStore for asynchronous API tracking
+class JobStore:
+    _instance = None
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(JobStore, cls).__new__(cls)
+            cls._instance.jobs = {}
+        return cls._instance
+        
+    def get(self, job_id: str) -> Optional[dict]:
+        return self.jobs.get(job_id)
+        
+    def update(self, job_id: str, **kwargs):
+        if job_id in self.jobs:
+            self.jobs[job_id].update(kwargs)
+            
+    def create(self, request_text: str) -> str:
+        job_id = str(uuid.uuid4())
+        self.jobs[job_id] = {
+            "status": "planning",
+            "title": "Document Generator",
+            "plan": [],
+            "logs": ["Job created. Starting autonomous planning agent..."],
+            "download_url": None,
+            "error": None
+        }
+        return job_id
+
+job_store = JobStore()
+
 class LoggingList(list):
+    def __init__(self, job_id: str = None):
+        super().__init__()
+        self.job_id = job_id
+        
     def append(self, item):
         print(f"[AGENT LOG] {item}", flush=True)
         super().append(item)
+        if self.job_id:
+            job_store.update(self.job_id, logs=list(self))
 
 # LangGraph State Definition
 class AgentState(TypedDict):
@@ -51,6 +89,7 @@ class AgentState(TypedDict):
     final_doc_path: str
     logs: List[str]
     step_count: int
+    job_id: str
 
 # Initialize LLM & Tools
 primary_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.1)
@@ -78,28 +117,42 @@ def extract_json(text: str) -> Optional[dict]:
         return None
 
 def invoke_llm(prompt: str, structured_output_model: Any = None, logs: List[str] = None) -> Any:
-    """Invokes LLM with automatic fallback to llama-3.1-8b-instant if rate limited, and raw JSON parsing fallback."""
+    """Invokes LLM with rate limit retries, fallback to llama-3.1-8b-instant, and raw JSON parsing fallback."""
     selected_llm = primary_llm
     
-    try:
-        if structured_output_model:
-            model = selected_llm.with_structured_output(structured_output_model)
-        else:
-            model = selected_llm
-        return model.invoke(prompt)
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "429" in err_msg or "rate limit" in err_msg:
-            msg = "Primary LLM rate limited. Switching to fallback llama-3.1-8b-instant..."
-            print(msg)
-            if logs is not None:
-                logs.append(f"System: {msg}")
-            selected_llm = fallback_llm
-        else:
+    # Try primary model with retries for rate limits
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
             if structured_output_model:
-                print(f"Primary structured invocation failed ({e}). Trying raw JSON fallback on primary...")
+                model = selected_llm.with_structured_output(structured_output_model)
             else:
-                raise e
+                model = selected_llm
+            return model.invoke(prompt)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "429" in err_msg or "rate limit" in err_msg:
+                # If daily quota limit exceeded, retry won't help. We check if daily limit is mentioned.
+                if "daily" in err_msg or "quota" in err_msg or attempt == max_retries:
+                    msg = "Primary LLM quota exhausted or max retries reached. Switching to fallback llama-3.1-8b-instant..."
+                    print(msg)
+                    if logs is not None:
+                        logs.append(f"System: {msg}")
+                    selected_llm = fallback_llm
+                    break
+                else:
+                    sleep_time = 3 + attempt * 2
+                    msg = f"Primary LLM rate limited (attempt {attempt+1}/{max_retries}). Retrying in {sleep_time}s..."
+                    print(msg)
+                    if logs is not None:
+                        logs.append(f"System: {msg}")
+                    time.sleep(sleep_time)
+            else:
+                if structured_output_model:
+                    print(f"Primary structured invocation failed ({e}). Trying raw JSON fallback on primary...")
+                    break
+                else:
+                    raise e
 
     try:
         if structured_output_model:
@@ -212,6 +265,11 @@ Guidelines:
     logs.append(f"Planner generated title: '{initial_plan.document_title}'")
     logs.append(f"Initial tasks: {[t['id'] for t in plan_dicts]}")
     
+    # Update JobStore if job_id is present
+    job_id = state.get("job_id")
+    if job_id:
+        job_store.update(job_id, status="running", title=initial_plan.document_title, plan=plan_dicts)
+        
     return {
         "document_title": initial_plan.document_title,
         "plan": plan_dicts,
@@ -225,8 +283,18 @@ def selector_node(state: AgentState) -> Dict[str, Any]:
     step_count = state.get("step_count", 0)
     
     # Guardrail: Limit maximum steps to prevent infinite planning loops
-    if step_count >= 8:
-        logs.append(f"Selector Guardrail: Maximum task execution limit (8) reached. Forcing compilation to prevent infinite loop.")
+    if step_count >= 12:
+        logs.append(f"Selector Guardrail: Maximum task execution limit (12) reached. Forcing compilation to prevent infinite loop.")
+        # Mark all pending or in-progress tasks as skipped
+        for t in plan:
+            if t["status"] in ["pending", "in_progress"]:
+                t["status"] = "skipped"
+                
+        # Update JobStore if job_id is present
+        job_id = state.get("job_id")
+        if job_id:
+            job_store.update(job_id, plan=list(plan))
+            
         return {
             "plan": plan,
             "current_task_id": "",
@@ -251,6 +319,11 @@ def selector_node(state: AgentState) -> Dict[str, Any]:
     else:
         current_task_id = ""
         logs.append("Selector: No pending tasks remaining. Document generation phase starting.")
+        
+    # Update JobStore if job_id is present
+    job_id = state.get("job_id")
+    if job_id:
+        job_store.update(job_id, plan=list(plan))
         
     return {
         "plan": plan,
@@ -348,6 +421,12 @@ Execute the task and return the findings/content.
             t["result"] = result_content
             
     step_count = state.get("step_count", 0) + 1
+    
+    # Update JobStore if job_id is present
+    job_id = state.get("job_id")
+    if job_id:
+        job_store.update(job_id, plan=list(plan))
+        
     return {
         "plan": plan,
         "logs": logs,
@@ -448,6 +527,11 @@ Guidelines:
     else:
         logs.append("Replanner: Plan checked. No new tasks added.")
         
+    # Update JobStore if job_id is present
+    job_id = state.get("job_id")
+    if job_id:
+        job_store.update(job_id, plan=list(updated_plan_dicts))
+        
     return {
         "plan": updated_plan_dicts,
         "document_sections": document_sections,
@@ -489,6 +573,24 @@ def generator_node(state: AgentState) -> Dict[str, Any]:
             })
             added_headings.add(heading)
             
+    # Sort sections numerically by heading prefix (e.g., "1. Introduction" -> [1], "3.1.2 Database" -> [3, 1, 2])
+    def parse_heading_numbers(heading_str: str) -> list:
+        match = re.match(r'^([\d\.]+)', heading_str.strip())
+        if match:
+            prefix = match.group(1)
+            parts = []
+            for p in prefix.split('.'):
+                if p.strip():
+                    try:
+                        parts.append(int(p.strip()))
+                    except ValueError:
+                        pass
+            if parts:
+                return parts
+        return [999]
+
+    sections_to_build.sort(key=lambda s: parse_heading_numbers(s["heading"]))
+
     # Generate clean filename
     safe_title = "".join(c for c in title if c.isalnum() or c in (" ", "_", "-")).rstrip()
     safe_title = safe_title.replace(" ", "_")
@@ -500,9 +602,15 @@ def generator_node(state: AgentState) -> Dict[str, Any]:
     try:
         build_academic_document(title, sections_to_build, output_path)
         logs.append(f"Generator: Word document generated successfully at '{output_path}'.")
+        job_id = state.get("job_id")
+        if job_id:
+            job_store.update(job_id, status="completed", download_url=f"/download/{filename}")
     except Exception as e:
         output_path = f"Error generating file: {str(e)}"
         logs.append(f"Generator Error: {str(e)}")
+        job_id = state.get("job_id")
+        if job_id:
+            job_store.update(job_id, status="failed", error=str(e))
         
     return {
         "final_doc_path": output_path,
@@ -557,8 +665,37 @@ def run_agent(request_text: str) -> Dict[str, Any]:
         "document_sections": {},
         "final_doc_path": "",
         "logs": LoggingList(),
-        "step_count": 0
+        "step_count": 0,
+        "job_id": ""
     }
     
     final_state = graph.invoke(initial_state)
     return final_state
+
+# Background execution runner helper using JobStore
+def run_agent_with_job(request_text: str, job_id: str) -> Dict[str, Any]:
+    graph = create_agent_graph()
+    initial_state = {
+        "request": request_text,
+        "document_title": "",
+        "plan": [],
+        "current_task_id": "",
+        "document_sections": {},
+        "final_doc_path": "",
+        "logs": LoggingList(job_id),
+        "step_count": 0,
+        "job_id": job_id
+    }
+    try:
+        final_state = graph.invoke(initial_state)
+        return final_state
+    except Exception as e:
+        msg = f"Agent execution failed with error: {str(e)}"
+        print(f"[AGENT ERROR] {msg}", flush=True)
+        job_store.update(job_id, status="failed", error=str(e))
+        # Log error in job
+        job = job_store.get(job_id)
+        if job:
+            job["logs"].append(msg)
+            job_store.update(job_id, logs=job["logs"])
+        raise e

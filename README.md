@@ -23,14 +23,14 @@ The core agent is powered by a state machine compiled using **LangGraph**. The w
 
 ```mermaid
 graph TD
-    START([Start]) --> Planner[1. Planner]
-    Planner --> Selector[2. Selector]
+    START([Start]) --> Planner[Planner]
+    Planner --> Selector[Selector]
     
-    Selector -->|Has pending tasks| Executor[3. Executor]
-    Executor --> Replanner[4. Re-planner]
+    Selector -->|Has pending tasks| Executor[Executor]
+    Executor --> Replanner[Re-planner]
     Replanner --> Selector
     
-    Selector -->|All tasks completed| Generator[5. Document Generator]
+    Selector -->|All tasks completed| Generator[ocument Generator]
     Generator --> END([End / Save Document])
 ```
 
