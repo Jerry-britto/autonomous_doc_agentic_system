@@ -146,7 +146,7 @@
             const filteredPlan = plan.filter(task => {
                 if (activeFilter === 'all') return true;
                 if (activeFilter === 'pending') {
-                    return task.status === 'pending' || task.status === 'skipped';
+                    return task.status === 'pending' || task.status === 'deferred';
                 }
                 if (activeFilter === 'in_progress') {
                     return task.status === 'in_progress';
@@ -163,22 +163,25 @@
                 
                 let toolBadge = task.assigned_tool !== 'none' ? `<span class="badge badge-tool">${task.assigned_tool}</span>` : '';
                 let headingBadge = task.section_heading ? `<span class="badge badge-heading">Heading: ${task.section_heading}</span>` : '';
+                let depsBadge = (task.dependencies && task.dependencies.length > 0) ? `<span class="badge badge-deps" style="background-color: #e2e8f0; color: #475569;">Needs: ${task.dependencies.join(', ')}</span>` : '';
                 
                 // Status emoji
                 let statusEmoji = "⏳";
                 if (task.status === "completed") statusEmoji = "✅";
                 if (task.status === "failed") statusEmoji = "❌";
                 if (task.status === "in_progress") statusEmoji = "🔄";
-                if (task.status === "skipped") statusEmoji = "⏭️";
+                if (task.status === "deferred") statusEmoji = "⏭️";
+                
+                let statusLabel = task.status === "deferred" ? "deferred (pending review)" : task.status;
                 
                 taskEl.innerHTML = `
                     <div class="task-summary">
                         <span class="task-emoji">${statusEmoji}</span>
                         <div class="task-info">
                             <div class="task-title"><strong>${task.id}</strong>: ${task.description}</div>
-                            <div class="task-badges">${toolBadge} ${headingBadge}</div>
+                            <div class="task-badges">${toolBadge} ${headingBadge} ${depsBadge}</div>
                         </div>
-                        <span class="task-status">${task.status}</span>
+                        <span class="task-status">${statusLabel}</span>
                     </div>
                 `;
                 

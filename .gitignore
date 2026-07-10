@@ -11,3 +11,4 @@ wheels/
 
 .env
 generated_docs
+jobs.json

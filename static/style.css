@@ -359,12 +359,12 @@ textarea:focus {
 .task-status-in_progress .task-status { color: var(--status-progress); background-color: #fef3c7; }
 .task-status-completed .task-status { color: var(--status-completed); background-color: #dcfce7; }
 .task-status-failed .task-status { color: var(--status-failed); background-color: #fee2e2; }
-.task-status-skipped {
+.task-status-deferred {
     opacity: 0.75;
     background-color: #f8fafc !important;
     border-style: dashed !important;
 }
-.task-status-skipped .task-status { color: #64748b; background-color: #e2e8f0; }
+.task-status-deferred .task-status { color: #64748b; background-color: #e2e8f0; }
 
 .task-result-details {
     margin-top: 0.75rem;

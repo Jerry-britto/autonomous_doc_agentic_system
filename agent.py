@@ -20,7 +20,8 @@ class InitialTaskPlan(BaseModel):
     description: str = Field(description="Detailed description of what the task should accomplish")
     assigned_tool: Literal["web_search", "draft_section", "none"] = Field(description="Tool to use: 'web_search', 'draft_section', or 'none'")
     section_heading: Optional[str] = Field(None, description="Heading of the section in the final document, e.g. '1. Introduction'")
-    status: Literal["pending", "in_progress", "completed", "failed"] = Field(default="pending")
+    status: Literal["pending", "in_progress", "completed", "failed", "deferred"] = Field(default="pending")
+    dependencies: List[str] = Field(default_factory=list, description="IDs of tasks that must be completed before this task can start")
     result: str = Field(default="", description="The output result or drafted content of the task")
 
 class InitialPlan(BaseModel):
@@ -32,7 +33,8 @@ class UpdateTaskPlan(BaseModel):
     description: Optional[str] = Field(None, description="Detailed description of what the task should accomplish")
     assigned_tool: Optional[Literal["web_search", "draft_section", "none"]] = Field(None, description="Tool to use: 'web_search', 'draft_section', or 'none'")
     section_heading: Optional[str] = Field(None, description="Heading of the section in the final document, e.g. '1. Introduction'")
-    status: Optional[Literal["pending", "in_progress", "completed", "failed"]] = Field(default="pending")
+    status: Optional[Literal["pending", "in_progress", "completed", "failed", "deferred"]] = Field(default="pending")
+    dependencies: Optional[List[str]] = Field(default_factory=list, description="IDs of tasks that must be completed before this task can start")
     result: Optional[str] = Field(default="", description="The output result or drafted content of the task")
 
 class PlanUpdate(BaseModel):
@@ -44,15 +46,34 @@ class JobStore:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(JobStore, cls).__new__(cls)
+            cls._instance.filepath = os.path.join(os.getcwd(), "jobs.json")
             cls._instance.jobs = {}
+            cls._instance.load()
         return cls._instance
         
+    def load(self):
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, "r") as f:
+                    self.jobs = json.load(f)
+            except Exception as e:
+                print(f"Error loading jobs from disk: {e}")
+                self.jobs = {}
+                
+    def save(self):
+        try:
+            with open(self.filepath, "w") as f:
+                json.dump(self.jobs, f, indent=2)
+        except Exception as e:
+            print(f"Error saving jobs to disk: {e}")
+            
     def get(self, job_id: str) -> Optional[dict]:
         return self.jobs.get(job_id)
         
     def update(self, job_id: str, **kwargs):
         if job_id in self.jobs:
             self.jobs[job_id].update(kwargs)
+            self.save()
             
     def create(self, request_text: str) -> str:
         job_id = str(uuid.uuid4())
@@ -64,6 +85,7 @@ class JobStore:
             "download_url": None,
             "error": None
         }
+        self.save()
         return job_id
 
 job_store = JobStore()
@@ -212,7 +234,8 @@ def invoke_llm(prompt: str, structured_output_model: Any = None, logs: List[str]
                                 "description": str(t.get("description", "draft")),
                                 "assigned_tool": t.get("assigned_tool", "none") if t.get("assigned_tool") in ["web_search", "draft_section", "none"] else "none",
                                 "section_heading": t.get("section_heading"),
-                                "status": t.get("status", "pending") if t.get("status") in ["pending", "in_progress", "completed", "failed"] else "pending",
+                                "status": t.get("status", "pending") if t.get("status") in ["pending", "in_progress", "completed", "failed", "deferred"] else "pending",
+                                "dependencies": t.get("dependencies", []) if isinstance(t.get("dependencies"), list) else [],
                                 "result": str(t.get("result", ""))
                             })
                         parsed_dict["tasks"] = clean_tasks
@@ -224,15 +247,16 @@ def invoke_llm(prompt: str, structured_output_model: Any = None, logs: List[str]
             raise e
 
 def get_plan_summary(plan: List[Dict[str, Any]]) -> str:
-    """Format the plan for LLM prompts."""
+    """Format the plan for LLM prompts, keeping it token-efficient."""
     summary = []
     for t in plan:
         tool_info = f" [Tool: {t['assigned_tool']}]" if t['assigned_tool'] != 'none' else ""
         heading_info = f" [Heading: {t['section_heading']}]" if t.get('section_heading') else ""
         summary.append(f"- ID: {t['id']} | Description: {t['description']}{tool_info}{heading_info} | Status: {t['status']}")
-        if t['result']:
-            snippet = t['result'][:150] + "..." if len(t['result']) > 150 else t['result']
-            summary.append(f"  Result: {snippet}")
+        # Only show result snippets for web search tasks to save context tokens
+        if t['result'] and t['assigned_tool'] == "web_search":
+            snippet = t['result'][:300] + "..." if len(t['result']) > 300 else t['result']
+            summary.append(f"  Research Summary: {snippet}")
     return "\n".join(summary)
 
 # 1. Planner Node
@@ -252,6 +276,7 @@ Guidelines:
 - Include tasks to draft specific sections (assigned_tool: 'draft_section' and specify the 'section_heading').
 - Keep the tasks in logical order (e.g., research/outline first, then drafting sections).
 - Do not create too many tasks at once; the replanner can add more tasks later based on findings.
+- DEPENDENCIES: For each task, specify its 'dependencies' as a list of other task IDs that must be completed before this task can start (e.g., drafting tasks should depend on the corresponding research tasks). If there are no prerequisites, leave it empty.
 """
     initial_plan = invoke_llm(prompt, InitialPlan, logs)
     
@@ -285,10 +310,10 @@ def selector_node(state: AgentState) -> Dict[str, Any]:
     # Guardrail: Limit maximum steps to prevent infinite planning loops
     if step_count >= 12:
         logs.append(f"Selector Guardrail: Maximum task execution limit (12) reached. Forcing compilation to prevent infinite loop.")
-        # Mark all pending or in-progress tasks as skipped
+        # Mark all pending or in-progress tasks as deferred
         for t in plan:
             if t["status"] in ["pending", "in_progress"]:
-                t["status"] = "skipped"
+                t["status"] = "deferred"
                 
         # Update JobStore if job_id is present
         job_id = state.get("job_id")
@@ -301,13 +326,26 @@ def selector_node(state: AgentState) -> Dict[str, Any]:
             "logs": logs
         }
     
-    # Find the first pending task
+    # Find the first pending task whose dependencies are all completed
     next_task = None
     for t in plan:
         if t["status"] == "pending":
-            next_task = t
-            break
+            # Check if all dependency tasks are completed
+            deps = t.get("dependencies", [])
+            if not isinstance(deps, list):
+                deps = []
             
+            all_dependencies_met = True
+            for dep_id in deps:
+                dep_task = next((x for x in plan if x["id"] == dep_id), None)
+                if dep_task and dep_task["status"] != "completed":
+                    all_dependencies_met = False
+                    break
+                    
+            if all_dependencies_met:
+                next_task = t
+                break
+                
     if next_task:
         # Mark as in_progress
         for t in plan:
@@ -318,7 +356,14 @@ def selector_node(state: AgentState) -> Dict[str, Any]:
         logs.append(f"Selector: Selected task '{current_task_id}' for execution.")
     else:
         current_task_id = ""
-        logs.append("Selector: No pending tasks remaining. Document generation phase starting.")
+        pending_remaining = [t["id"] for t in plan if t["status"] == "pending"]
+        if pending_remaining:
+            logs.append(f"Selector: Remaining pending tasks {pending_remaining} have unsatisfied dependencies. Deferring execution.")
+            for t in plan:
+                if t["status"] in ["pending", "in_progress"]:
+                    t["status"] = "deferred"
+        else:
+            logs.append("Selector: No pending tasks remaining. Document generation phase starting.")
         
     # Update JobStore if job_id is present
     job_id = state.get("job_id")
@@ -459,11 +504,17 @@ def replanner_node(state: AgentState) -> Dict[str, Any]:
     
     plan_summary = get_plan_summary(plan)
     
+    # Format a highly concise snippet of the active task result to save tokens
+    if current_task["assigned_tool"] == "web_search":
+        active_result_snippet = current_task['result'][:500] + "..." if len(current_task['result']) > 500 else current_task['result']
+    else:
+        active_result_snippet = current_task['result'][:150] + "..." if len(current_task['result']) > 150 else current_task['result']
+        
     prompt = f"""You are an expert re-planner. Review the execution of the active task and update the document plan.
 Original User Request: {state['request']}
 Active Task ID: {current_task_id}
 Active Task Description: {current_task['description']}
-Active Task Result: {current_task['result'][:1000]}... (truncated)
+Active Task Result: {active_result_snippet}
 
 Current Plan & Status:
 {plan_summary}
@@ -471,10 +522,11 @@ Current Plan & Status:
 Your job is to update the plan. You must return the COMPLETE list of tasks.
 Guidelines:
 - Mark the active task '{current_task_id}' as 'completed' (or 'failed' if it failed).
-- Add new tasks if you need to draft more sections, execute other sub-steps, or perform further research based on the findings.
 - Keep pending tasks if they are still relevant.
 - Update pending tasks if their descriptions should change based on new findings.
 - If all sections have been drafted to fulfill the user request, do not add any new tasks.
+- TASK MINIMIZATION: Only add new tasks if they are absolutely critical to resolving an essential information/content gap. Do not add micro-tasks or redundant sub-tasks.
+- DEPENDENCIES: For any task you add, specify its 'dependencies' as a list of task IDs that must be completed before this task can start (e.g., a section drafting task depends on its corresponding research task).
 """
     plan_update = invoke_llm(prompt, PlanUpdate, logs)
     
@@ -483,6 +535,14 @@ Guidelines:
     
     # Create lookup map for existing tasks from the previous state
     old_tasks = {t["id"]: t for t in plan}
+    new_task_ids = {t["id"] for t in updated_plan_dicts}
+    
+    # Preserve any completed, failed, or deferred tasks that the LLM omitted
+    preserved_old_tasks = []
+    for old_id, old_t in old_tasks.items():
+        if old_id not in new_task_ids:
+            if old_t.get("status") in ["completed", "failed", "deferred"]:
+                preserved_old_tasks.append(old_t)
     
     # Re-apply status and results from previous state to prevent LLM hallucinations
     for t in updated_plan_dicts:
@@ -495,6 +555,9 @@ Guidelines:
                 t["assigned_tool"] = old_t.get("assigned_tool", "none")
             if not t.get("section_heading"):
                 t["section_heading"] = old_t.get("section_heading")
+            # Preserve dependencies
+            if "dependencies" not in t or not t["dependencies"]:
+                t["dependencies"] = old_t.get("dependencies", [])
                 
             if t["id"] == current_task_id:
                 # Update current active task status
@@ -505,7 +568,10 @@ Guidelines:
                 t["result"] = old_t.get("result", "")
             else:
                 # Preserve original status and results of other existing tasks
-                t["status"] = old_t.get("status", "pending")
+                if old_t.get("status") == "deferred":
+                    t["status"] = "deferred"
+                else:
+                    t["status"] = old_t.get("status", "pending")
                 t["result"] = old_t.get("result", "")
         else:
             # Newly added task: must start as pending
@@ -516,24 +582,28 @@ Guidelines:
                 t["description"] = "Drafting new section content"
             if not t.get("assigned_tool"):
                 t["assigned_tool"] = "none"
+            if "dependencies" not in t or not t["dependencies"]:
+                t["dependencies"] = []
             
     # Trace differences
     old_task_ids = list(old_tasks.keys())
-    new_task_ids = [t["id"] for t in updated_plan_dicts]
-    added_tasks = [tid for tid in new_task_ids if tid not in old_task_ids]
+    new_task_ids_list = [t["id"] for t in updated_plan_dicts]
+    added_tasks = [tid for tid in new_task_ids_list if tid not in old_task_ids]
     
     if added_tasks:
         logs.append(f"Replanner: Dynamically added tasks to plan: {added_tasks}")
     else:
         logs.append("Replanner: Plan checked. No new tasks added.")
         
+    final_plan_list = preserved_old_tasks + updated_plan_dicts
+        
     # Update JobStore if job_id is present
     job_id = state.get("job_id")
     if job_id:
-        job_store.update(job_id, plan=list(updated_plan_dicts))
+        job_store.update(job_id, plan=list(final_plan_list))
         
     return {
-        "plan": updated_plan_dicts,
+        "plan": final_plan_list,
         "document_sections": document_sections,
         "logs": logs
     }
