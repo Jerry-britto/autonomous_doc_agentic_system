@@ -1,0 +1,12 @@
+services:
+  agent-app:
+    build:
+      context: .
+      network: host
+    container_name: fluid-ai-agent
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./generated_docs:/app/generated_docs
+    restart: unless-stopped
