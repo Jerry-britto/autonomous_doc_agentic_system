@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 from agent import run_agent_with_job, job_store
@@ -103,3 +103,68 @@ async def get_css():
     if not os.path.exists(css_path):
         raise HTTPException(status_code=404, detail="CSS file not found.")
     return FileResponse(css_path, media_type="text/css")
+
+@app.get("/graph")
+async def get_graph_representation():
+    from agent.workflow import create_agent_graph
+    graph = create_agent_graph()
+    try:
+        # Try to draw the PNG representation using mermaid.ink API (requires internet)
+        png_bytes = graph.get_graph().draw_mermaid_png()
+        return Response(content=png_bytes, media_type="image/png")
+    except Exception as e:
+        # Fallback to serving a self-contained HTML page that renders Mermaid diagram client-side
+        mermaid_code = graph.get_graph().draw_mermaid()
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>LangGraph Workflow Orchestration Diagram</title>
+            <script type="module">
+                import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+                mermaid.initialize({{ startOnLoad: true }});
+            </script>
+            <style>
+                body {{
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background-color: #f4f7f9;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    margin: 0;
+                    padding: 40px;
+                }}
+                h1 {{
+                    color: #2c3e50;
+                    font-size: 24px;
+                    margin-bottom: 5px;
+                }}
+                p {{
+                    color: #7f8c8d;
+                    margin-top: 0;
+                    margin-bottom: 30px;
+                }}
+                .graph-container {{
+                    background: white;
+                    border-radius: 12px;
+                    box-shadow: 0 8px 16px rgba(0,0,0,0.06);
+                    padding: 40px;
+                    border: 1px solid #e2e8f0;
+                    max-width: 90%;
+                    overflow: auto;
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>LangGraph Workflow Orchestration</h1>
+            <p>Interactive Mermaid.js Fallback Diagram</p>
+            <div class="graph-container">
+                <pre class="mermaid">
+{mermaid_code}
+                </pre>
+            </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+
